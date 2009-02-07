@@ -14,12 +14,17 @@ class Recv(object):
 class MiniThread(Thread):
     def __init__(self):
         Thread.__init__(self)
-        self._tasks = []
+        self._alive_head = None
+        self._alive_tail = None
+        self._pending_head = None
+        self._pending_tail = None
+        self._current_pending = None
         self._channels = []
         self._csize = 0
         self._current = -1
         self._size = 0
-        #self._times = 0
+        self._times = 0
+        self._times2 = 0
 
 
     class Task(object):
@@ -27,8 +32,9 @@ class MiniThread(Thread):
             self.thread = thread
             self.target = target
             self.p = p
-            self.awake = True
             self.channel = None
+            self.next = None
+            self.last = None
             
     end = Task(None, None, -1)
             
@@ -51,7 +57,7 @@ class MiniThread(Thread):
             _target = target
         p = self._size
         task = self.Task(self, _target, p)
-        self._tasks.append(task)
+        self._live(task)
         self._size += 1
     
     def channel(self):
@@ -62,36 +68,95 @@ class MiniThread(Thread):
         return c
         
     def _wakeup(self, task):
-        task.awake = True
+        self._live(task)
+        self._nopend(task)
+        
+    def _live(self, task):
+        if self._alive_head is None:
+            self._alive_head = task
+            self._alive_tail = task
+            task.next = task
+            task.last = task
+        else:
+            task.next = self._alive_head
+            task.last = self._alive_tail
+            self._alive_tail.next = task
+            self._alive_tail = task
+            
+    def _nolive(self, task):
+        if self._alive_head == self._alive_tail:
+            self._alive_head = None
+            self._alive_tail = None
+            del task.next
+            del task.last
+            return
+        if task == self._alive_head:
+            self._alive_head = task.next
+        elif task == self._alive_tail:
+            self._alive_tail = task.last
+        last = task.last
+        next = task.next
+        last.next = next
+        next.last = last
+        
+    def _nopend(self, task):
+        if self._pending_head == self._pending_tail:
+            self._pending_head = None
+            self._pending_tail = None
+            self._current_pending = None
+            del task.next
+            del task.last
+            return
+        if task == self._pending_head:
+            self._pending_head = task.next
+        elif task == self._pending_tail:
+            self._pending_tail = task.last
+        last = task.last
+        next = task.next
+        last.next = next
+        next.last = last
+        if task == self._current_pending:
+            self._current_pending = next
+        
 
     def _pend(self, task):
-        task.awake = False
+        self._nolive(task)
+        if self._pending_head is None:
+            self._pending_head = task
+            self._pending_tail = task
+            task.next = task
+            task.last = task
+            self._current_pending = task
+        else:
+            task.next = self._pending_head
+            task.last = self._pending_tail
+            self._pending_tail.next = task
+            self._pending_tail = task
         
     def _done(self, task):
-        del self._tasks[task.p]
-        self._current -= 1
-        self._size -= 1
+        self._nolive(task)
         
     def _dealmsg(self, task):
         msg = task.channel.msgs.pop(0)
         self._wakeup(msg.source)
         recver = task.channel.recvers.pop(0)
         recver.set(msg.content)
-        self._wakeup(task)
+        self._nopend(task)
 
     def _fetch(self):
-        p = self._current
-        for i in xrange(self._size):
-            p += 1
-            if p >= self._size: p = p % self._size 
-            task = self._tasks[p]
+        task = self._alive_head
+        if task is not None:
+            self._nolive(task)
+            return task
+        
+        task = self._current_pending
+        while True:
             if task.channel and task.channel.recvers and task.channel.msgs:
                 self._dealmsg(task)
-            if task.awake:
-                self._current = p
-                task.p = p
                 return task
-        self._current = -1
+            task = task.next
+            if task == self._current_pending:
+                break
         return None
 
     def _recv(self, task, channel, recver):
@@ -100,15 +165,16 @@ class MiniThread(Thread):
         channel.recvers.append(recver)
         task.channel = channel
         self._pend(task)
+        self._times2 += 1
 
     def _send(self, task, channel, msg):
         task.channel = None
         self._pend(task)
         channel.msgs.append(self.Msg(task, msg))
+        self._times += 1
 
     def run(self):
         while True:
-            #self._times += 1
             task = self._fetch()
             if task is None:
                 break
@@ -133,10 +199,9 @@ class MiniThread(Thread):
                 self._done(task)
             except Exception, ex:
                 print type(ex), ex
-
-        if self._size:
+        if self._alive_head:
             raise self.DeadLock('There is no sender but receiver or no receiver but sender!')
-        #print 'run times:', self._times
+        print 'run times:', self._times, self._times2
         
     class BadYield(Exception):
         pass
@@ -161,14 +226,14 @@ def task1(channel, x):
     yield
 
 def task2(channel, x):
-    for i in xrange(10):
+    for i in xrange(1):
         #print 'send', channel, x, 'task2'
         yield send, channel, x
     #print 'task2 end:', x
     yield
 
 def task3(channel):
-    for i in xrange(10):
+    for i in xrange(100000):
         #print 'send', channel, 'task3'
         yield send, channel, i
     #print 'send end'
@@ -180,7 +245,7 @@ def test():
     #mini.task(task0, 2)
     channel = mini.channel()
     mini.task(task1(channel, -1))
-    for i in xrange(1000):
+    for i in xrange(20000):
         mini.task(task2(channel, i))
     mini.task(task3(channel))
     #mysl.start()
