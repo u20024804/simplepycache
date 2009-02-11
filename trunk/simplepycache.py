@@ -237,14 +237,3 @@ if __name__ == '__main__':
         cacheserver.config(address)
     cacheserver.start()
     waitForDie()
-    '''
-    from multiprocessing import Process
-    import profile
-    def _fn():
-        cacheserver.start()
-        cacheserver.join()
-    process = Process(target=lambda : profile.runctx("_fn()", globals(), locals()))
-    process.daemon = True
-    process.start()
-    waitForDie()
-    '''
